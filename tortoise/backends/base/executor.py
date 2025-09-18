@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import decimal
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from copy import copy
 from typing import TYPE_CHECKING, Any, cast
 
@@ -99,6 +99,44 @@ class BaseExecutor:
         sql = " ".join((self.EXPLAIN_PREFIX, sql))
         return (await self.db.execute_query(sql))[1]
 
+    async def _process_select(
+        self, row_idx: int, row: dict, custom_fields: list | None = None
+    ) -> Model:
+        if row_idx != 0 and row_idx % CHUNK_SIZE == 0:
+            # Forcibly yield to the event loop to avoid blocking the event loop
+            # when selecting a large number of rows
+            await asyncio.sleep(0)
+
+        if self.select_related_idx:
+            _, current_idx, _, _, path = self.select_related_idx[0]
+            row_items = list(dict(row).items())
+            instance: Model = self.model._init_from_db(**dict(row_items[:current_idx]))
+            instances: dict[Any, Any] = {path: instance}
+            for model, index, *__, full_path in self.select_related_idx[1:]:
+                (*path, attr) = full_path
+                related_items = row_items[current_idx : current_idx + index]
+                if any(v for _, v in related_items):
+                    obj = model._init_from_db(**{k.split(".")[1]: v for k, v in related_items})
+                elif index == 0:
+                    # 0 signals that an empty "filler" object should be created in the case
+                    # where a field of related model is selected but model itself isn't,
+                    # e.g. .only("relatedmodel__field")
+                    obj = model._init_from_db()
+                else:
+                    obj = None
+                target = instances.get(tuple(path))
+                if target is not None:
+                    setattr(target, f"_{attr}", obj)
+                if obj is not None:
+                    instances[(*path, attr)] = obj
+                current_idx += index
+        else:
+            instance = self.model._init_from_db(**row)
+        if custom_fields:
+            for field in custom_fields:
+                setattr(instance, field, row[field])
+        return instance
+
     async def execute_select(
         self,
         sql: str,
@@ -108,42 +146,23 @@ class BaseExecutor:
         _, raw_results = await self.db.execute_query(sql, values)
         instance_list = []
         for row_idx, row in enumerate(raw_results):
-            if row_idx != 0 and row_idx % CHUNK_SIZE == 0:
-                # Forcibly yield to the event loop to avoid blocking the event loop
-                # when selecting a large number of rows
-                await asyncio.sleep(0)
-
-            if self.select_related_idx:
-                _, current_idx, _, _, path = self.select_related_idx[0]
-                row_items = list(dict(row).items())
-                instance: Model = self.model._init_from_db(**dict(row_items[:current_idx]))
-                instances: dict[Any, Any] = {path: instance}
-                for model, index, *__, full_path in self.select_related_idx[1:]:
-                    (*path, attr) = full_path
-                    related_items = row_items[current_idx : current_idx + index]
-                    if any(v for _, v in related_items):
-                        obj = model._init_from_db(**{k.split(".")[1]: v for k, v in related_items})
-                    elif index == 0:
-                        # 0 signals that an empty "filler" object should be created in the case
-                        # where a field of related model is selected but model itself isn't,
-                        # e.g. .only("relatedmodel__field")
-                        obj = model._init_from_db()
-                    else:
-                        obj = None
-                    target = instances.get(tuple(path))
-                    if target is not None:
-                        setattr(target, f"_{attr}", obj)
-                    if obj is not None:
-                        instances[(*path, attr)] = obj
-                    current_idx += index
-            else:
-                instance = self.model._init_from_db(**row)
-            if custom_fields:
-                for field in custom_fields:
-                    setattr(instance, field, row[field])
+            instance = await self._process_select(row_idx, row, custom_fields)
             instance_list.append(instance)
         await self._execute_prefetch_queries(instance_list)
         return instance_list
+
+    async def execute_select_stream(
+        self,
+        sql: str,
+        values: list | None = None,
+        custom_fields: list | None = None,
+    ) -> AsyncGenerator:
+        row_idx = 0
+        async for row in self.db.execute_query_stream(sql, values):
+            instance = await self._process_select(row_idx, row, custom_fields)
+            await self._execute_prefetch_queries([instance])
+            yield instance
+            row_idx += 1
 
     def _prepare_insert_columns(
         self, include_generated: bool = False

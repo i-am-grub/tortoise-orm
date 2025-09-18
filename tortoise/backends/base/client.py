@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Generic, TypeVar, cast
 
 from pypika_tortoise import Query
@@ -217,6 +217,18 @@ class BaseDBAsyncClient(abc.ABC):
 
         :param query: The SQL string, pre-parametrized for the target DB dialect.
         :param values: A sequence of positional DB parameters.
+        """
+        raise NotImplementedError()  # pragma: nocoverage
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None
+    ) -> AsyncGenerator[dict, None]:
+        """
+        Executes a RAW SQL query statement, and yields the resultset.
+
+        :param query: The SQL string, pre-parametrized for the target DB dialect.
+        :param values: A sequence of positional DB parameters.
+        :return: A tuple of: (The number of rows affected, The resultset)
         """
         raise NotImplementedError()  # pragma: nocoverage
 

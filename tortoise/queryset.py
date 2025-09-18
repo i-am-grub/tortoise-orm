@@ -1228,7 +1228,17 @@ class QuerySet(AwaitableQuery[MODEL]):
         return self._execute().__await__()
 
     async def __aiter__(self) -> AsyncIterator[MODEL]:
-        for val in await self:
+        instances = self._db.executor_class(
+            model=self.model,
+            db=self._db,
+            prefetch_map=self._prefetch_map,
+            prefetch_queries=self._prefetch_queries,
+            select_related_idx=self._select_related_idx,  # type: ignore
+        ).execute_select_stream(
+            *self.query.get_parameterized_sql(),
+            custom_fields=list(self._annotations.keys()),
+        )
+        async for val in instances:
             yield val
 
     async def _execute(self) -> list[MODEL]:

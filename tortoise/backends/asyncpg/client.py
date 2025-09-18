@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from typing import Any, TypeVar
 
 import asyncpg
@@ -152,6 +152,22 @@ class AsyncpgDBClient(BasePostgresClient):
             if values:
                 return list(map(dict, await connection.fetch(query, *values)))
             return list(map(dict, await connection.fetch(query)))
+
+    async def execute_query_stream(
+        self, query: str, values: list | None = None
+    ) -> AsyncGenerator[dict, None]:
+        async with self.acquire_connection() as connection:
+            self.log.debug("%s: %s", query, values)
+            if values:
+                params = [query, *values]
+            else:
+                params = [query]
+            if query.startswith("UPDATE") or query.startswith("DELETE"):
+                await connection.execute(*params)
+                return
+            async with connection.transaction():
+                async for row in connection.cursor(*params):
+                    yield row
 
 
 class TransactionWrapper(AsyncpgDBClient, TransactionalDBClient):

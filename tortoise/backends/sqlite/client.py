@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import AsyncGenerator, Callable, Coroutine, Sequence
 from functools import wraps
 from itertools import count
 from typing import Any, TypeVar, cast
@@ -34,6 +34,7 @@ from tortoise.exceptions import (
 
 T = TypeVar("T")
 FuncType = Callable[..., Coroutine[None, None, T]]
+GenType = Callable[..., AsyncGenerator[T, None]]
 
 
 def translate_exceptions(func: FuncType) -> FuncType:
@@ -41,6 +42,20 @@ def translate_exceptions(func: FuncType) -> FuncType:
     async def translate_exceptions_(self, query, *args) -> T:
         try:
             return await func(self, query, *args)
+        except sqlite3.OperationalError as exc:
+            raise OperationalError(exc)
+        except sqlite3.IntegrityError as exc:
+            raise IntegrityError(exc)
+
+    return translate_exceptions_
+
+
+def translate_generator_exceptions(func: GenType) -> GenType:
+    @wraps(func)
+    async def translate_exceptions_(self, query, *args) -> AsyncGenerator[T, None]:
+        try:
+            async for i in func(self, query, *args):
+                yield i
         except sqlite3.OperationalError as exc:
             raise OperationalError(exc)
         except sqlite3.IntegrityError as exc:
@@ -167,6 +182,17 @@ class SqliteClient(BaseDBAsyncClient):
         async with self.acquire_connection() as connection:
             self.log.debug(query)
             await connection.executescript(query)
+
+    @translate_generator_exceptions
+    async def execute_query_stream(
+        self, query: str, values: list | None = None
+    ) -> AsyncGenerator[dict, None]:
+        query = query.replace("\x00", "'||CHAR(0)||'")
+        async with self.acquire_connection() as connection:
+            self.log.debug("%s: %s", query, values)
+            async with connection.execute(query, values) as cursor:
+                async for row in cursor:
+                    yield row
 
 
 class SqliteTransactionContext(TransactionContext):
