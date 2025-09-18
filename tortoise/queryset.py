@@ -1228,6 +1228,9 @@ class QuerySet(AwaitableQuery[MODEL]):
         return self._execute().__await__()
 
     async def __aiter__(self) -> AsyncIterator[MODEL]:
+        if self._db is None:
+            self._db = self._choose_db(self._select_for_update)  # type: ignore
+        self._make_query()
         instances = self._db.executor_class(
             model=self.model,
             db=self._db,
@@ -1238,8 +1241,14 @@ class QuerySet(AwaitableQuery[MODEL]):
             *self.query.get_parameterized_sql(),
             custom_fields=list(self._annotations.keys()),
         )
+        idx = 0
         async for val in instances:
+            if self._single and idx > 0:
+                raise MultipleObjectsReturned(self.model)
             yield val
+            idx += 1
+        if idx == 0 and self._raise_does_not_exist:
+            raise DoesNotExist(self.model)
 
     async def _execute(self) -> list[MODEL]:
         instance_list = await self._db.executor_class(
